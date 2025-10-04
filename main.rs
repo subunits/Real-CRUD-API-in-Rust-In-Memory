@@ -1,127 +1,62 @@
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::{delete, get, post, put},
-    Json, Router,
-};
-use serde::{Deserialize, Serialize};
-use std::{
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-};
-use uuid::Uuid;
-
-#[derive(Serialize, Deserialize, Clone)]
-struct Todo {
-    id: Uuid,
-    title: String,
-    done: bool,
-}
-
-type Db = Arc<Mutex<Vec<Todo>>>;
-
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-enum ApiError {
-    NotFound,
-    BadRequest(String),
-    Internal(String),
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, msg) = match self {
-            ApiError::NotFound => (StatusCode::NOT_FOUND, "Not Found".to_string()),
-            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
-        };
-        let body = Json(ErrorResponse { error: msg });
-        (status, body).into_response()
-    }
-}
-
-// CREATE
-async fn create(State(db): State<Db>, Json(mut todo): Json<Todo>)
-    -> Result<(StatusCode, Json<Todo>), ApiError>
-{
-    if todo.title.trim().is_empty() {
-        return Err(ApiError::BadRequest("Title cannot be empty".into()));
-    }
-    if todo.id.is_nil() {
-        todo.id = Uuid::new_v4();
-    }
-    db.lock().map_err(|_| ApiError::Internal("DB lock failed".into()))?
-        .push(todo.clone());
-    Ok((StatusCode::CREATED, Json(todo)))
-}
-
-// READ ALL
-async fn list(State(db): State<Db>) -> Result<Json<Vec<Todo>>, ApiError> {
-    let todos = db.lock().map_err(|_| ApiError::Internal("DB lock failed".into()))?;
-    Ok(Json(todos.clone()))
-}
-
-// READ ONE
-async fn read(State(db): State<Db>, Path(id): Path<Uuid>)
-    -> Result<Json<Todo>, ApiError>
-{
-    let todos = db.lock().map_err(|_| ApiError::Internal("DB lock failed".into()))?;
-    if let Some(todo) = todos.iter().cloned().find(|t| t.id == id) {
-        Ok(Json(todo))
-    } else {
-        Err(ApiError::NotFound)
-    }
-}
-
-// UPDATE
-async fn update(
-    State(db): State<Db>,
-    Path(id): Path<Uuid>,
-    Json(new): Json<Todo>,
-) -> Result<Json<Todo>, ApiError> {
-    let mut todos = db.lock().map_err(|_| ApiError::Internal("DB lock failed".into()))?;
-    if let Some(todo) = todos.iter_mut().find(|t| t.id == id) {
-        if new.title.trim().is_empty() {
-            return Err(ApiError::BadRequest("Title cannot be empty".into()));
-        }
-        todo.title = new.title;
-        todo.done = new.done;
-        Ok(Json(todo.clone()))
-    } else {
-        Err(ApiError::NotFound)
-    }
-}
-
-// DELETE
-async fn delete(State(db): State<Db>, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
-    let mut todos = db.lock().map_err(|_| ApiError::Internal("DB lock failed".into()))?;
-    let before = todos.len();
-    todos.retain(|t| t.id != id);
-    if todos.len() < before {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::NotFound)
-    }
-}
+use axum::{routing::get, routing::post, routing::put, routing::delete, Router, Json, extract::{Path, State}};
+use serde_json::json;
+use std::net::SocketAddr;
+use real_crud_api::{self as core, Db, Todo};
 
 #[tokio::main]
 async fn main() {
-    let db: Db = Arc::new(Mutex::new(Vec::new()));
+    let db: Db = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
 
     let app = Router::new()
-        .route("/todos", post(create).get(list))
-        .route("/todos/:id", get(read).put(update).delete(delete))
+        .route("/todos", get(list_todos).post(create_todo))
+        .route("/todos/:id", get(get_todo).put(update_todo).delete(delete_todo))
         .with_state(db);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    println!("🚀 Running on http://{}", addr);
+    println!("REST server listening on {}", addr);
+    axum::Server::bind(&addr).serve(app.into_make_service()).await.unwrap();
+}
 
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+async fn list_todos(State(db): State<Db>) -> Json<Vec<Todo>> {
+    Json(core::list(&db))
+}
+
+async fn create_todo(State(db): State<Db>, Json(payload): Json<Todo>) -> Json<serde_json::Value> {
+    match core::create(&db, payload) {
+        Ok(todo) => Json(json!({ "ok": todo })),
+        Err(e) => Json(json!({ "error": e })),
+    }
+}
+
+async fn get_todo(State(db): State<Db>, Path(id): Path<String>) -> Json<serde_json::Value> {
+    match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => match core::read(&db, uuid) {
+            Some(todo) => Json(json!({ "ok": todo })),
+            None => Json(json!({ "error": "Not Found" })),
+        },
+        Err(_) => Json(json!({ "error": "Invalid UUID" })),
+    }
+}
+
+async fn update_todo(State(db): State<Db>, Path(id): Path<String>, Json(payload): Json<Todo>) -> Json<serde_json::Value> {
+    match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => match core::update(&db, uuid, payload.title, payload.done) {
+            Ok(todo) => Json(json!({ "ok": todo })),
+            Err(e) => Json(json!({ "error": e })),
+        },
+        Err(_) => Json(json!({ "error": "Invalid UUID" })),
+    }
+}
+
+async fn delete_todo(State(db): State<Db>, Path(id): Path<String>) -> Json<serde_json::Value> {
+    match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => {
+            if core::delete(&db, uuid) {
+                Json(json!({ "ok": true }))
+            } else {
+                Json(json!({ "error": "Not Found" }))
+            }
+        }
+        Err(_) => Json(json!({ "error": "Invalid UUID" })),
+    }
 }
