@@ -15,12 +15,10 @@ All CRUD logic is shared in `lib.rs` (WASM-friendly), making the system portable
 real_crud_api/
 ├── Cargo.toml        # Dependencies
 ├── build.rs          # Builds gRPC code from proto
-├── proto/
-│   └── todo.proto    # Protobuf definition
-└── src/
-    ├── lib.rs        # Core CRUD logic (WASM-ready)
-    ├── main.rs       # REST server (Axum)
-    └── grpc.rs       # gRPC server (Tonic)
+├── todo.proto    # Protobuf definition
+├── lib.rs        # Core CRUD logic (WASM-ready)
+├── main.rs       # REST server (Axum)
+└── grpc.rs       # gRPC server (Tonic)
 ```
 
 ---
